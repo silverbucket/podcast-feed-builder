@@ -1,0 +1,25 @@
+{
+  "name": "podcast-feed-builder",
+  "version": "1.0.0",
+  "description": "Personal project not intended for general use",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/silverbucket/podcast-feed-builder.git"
+  },
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/silverbucket/podcast-feed-builder/issues"
+  },
+  "homepage": "https://github.com/silverbucket/podcast-feed-builder#readme",
+  "dependencies": {
+    "axios": "^0.21.1",
+    "jsdom": "^16.4.0",
+    "node-html-parser": "^3.0.3",
+    "rss": "^1.2.2"
+  }
+}
