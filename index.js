@@ -60,7 +60,7 @@ function fetchPage(page) {
             .then((res) => {
               const document = parse(res.data);
               const section = document.querySelector('section');
-              page.description = section.innerText;
+              // page.description = section.innerText;
               const source = document.querySelector('source');
               let audio = "";
               if (source) {
