@@ -5,7 +5,6 @@ const parse = require('node-html-parser').parse;
 const RSS = require('rss');
 
 const config = require('./config.js');
-// const episodes = {};
 const feed = new RSS(config.podcast);
 
 const session = axios.create({
@@ -43,7 +42,7 @@ function fetchPage(page) {
         pages.push({
           guid: elem.id,
           title: header.title,
-          url: header.href,
+          url: header.href.trim(),
           date: "",
           description: "",
           audio: "",
@@ -59,11 +58,22 @@ function fetchPage(page) {
           session.get(`${page.url}`)
             .then((res) => {
               const document = parse(res.data);
-              page.description = document.querySelector('section').innerText;
+              const section = document.querySelector('section');
+              page.description = section.innerText;
               const source = document.querySelector('source');
+              let audio = "";
               if (source) {
-                page.srcAudio = source.attributes.src.split('?')[0];
+                audio = source.attributes.src;
+              } else {
+                for (let elem of section.childNodes) {
+                  if (typeof elem.getAttribute === 'function' && elem.getAttribute('class') === 'episode-audio-box') {
+                    try {
+                      audio = elem.querySelector('a').attributes.href;
+                    } catch (e) {}
+                  }
+                }
               }
+              page.srcAudio = audio.split('?')[0];
             }).then(() => {
               // download audio file
               if (page.srcAudio) {
@@ -78,26 +88,26 @@ function fetchPage(page) {
               if (page.srcAudio) {
                 // episodes[page.guid] = page;
                 feed.item(page);
-                console.log(`finished ${page.title}`);
+                console.log(`+ finished ${page.title}`);
               } else {
-                console.log(`skipping ${page.title}`);
+                console.log(`... skipping ${page.title} - ${page.url}`);
               }
             }).then(() => {
               completed += 1;
               if (completed === pages.length) resolve();
             }).catch((err) => {
-              console.log(`failed getting episode data for ${page.url}`, err.toString());
+              console.log(`... failed getting episode data for ${page.url}`, err.toString());
             });
         });
       });
     }).then(() => {
-      console.log(`completed page {$page}`, );
+      console.log(`completed page ${page}`);
       return fetchPage(++page);
     }).catch((err) => {
       console.log(err.toString());
       // generate rss feed
       fs.writeFile(config.feedfile, feed.xml({index: true}),
-        () => { console.log(`successfully wrote feed to ${config.feedfile}`)});
+        () => { console.log(`= successfully wrote feed to ${config.feedfile}`)});
     });
 }
-fetchPage(1);
+fetchPage(11);
