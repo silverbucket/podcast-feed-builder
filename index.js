@@ -44,6 +44,7 @@ function fetchPage(page) {
           title: header.title,
           url: header.href.trim(),
           date: "",
+          filename: "",
           description: "",
           audio: "",
           srcAudio: "",
@@ -77,12 +78,17 @@ function fetchPage(page) {
             }).then(() => {
               // download audio file
               if (page.srcAudio) {
-                return downloadFile(page.srcAudio, config.docroot);
+                page.filename = page.srcAudio.split('/').pop();
+                if (fs.existsSync(`${config.docroot}${page.filename}`)) {
+                  console.log(`... skipping ${page.title} - already downloaded`);
+                } else {
+                  return downloadFile(page.srcAudio, config.docroot);
+                }
               }
             }).then(() => {
               // set public download url
               if (page.srcAudio) {
-                page.src = `${config.podcast.site_url}/${page.srcAudio.split('/').pop()}`;
+                page.src = `${config.podcast.site_url}/${page.filename}`;
               }
             }).then(() => {
               if (page.srcAudio) {
@@ -90,7 +96,7 @@ function fetchPage(page) {
                 feed.item(page);
                 console.log(`+ finished ${page.title}`);
               } else {
-                console.log(`... skipping ${page.title} - ${page.url}`);
+                console.log(`... no audio found for ${page.title} - ${page.url}`);
               }
             }).then(() => {
               completed += 1;
