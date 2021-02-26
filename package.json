@@ -18,7 +18,6 @@
   "homepage": "https://github.com/silverbucket/podcast-feed-builder#readme",
   "dependencies": {
     "axios": "^0.21.1",
-    "jsdom": "^16.4.0",
     "node-html-parser": "^3.0.3",
     "rss": "^1.2.2"
   }
