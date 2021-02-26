@@ -110,4 +110,4 @@ function fetchPage(page) {
         () => { console.log(`= successfully wrote feed to ${config.feedfile}`)});
     });
 }
-fetchPage(11);
+fetchPage(1);
