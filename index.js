@@ -25,7 +25,7 @@ const downloadFile = async (fileUrl, downloadFolder) => {
     });
     await response.data.pipe(fs.createWriteStream(localFilePath));
   } catch (err) {
-    console.log("failed download file");
+    console.log("... file download failed ", err.toString());
     throw new Error(err);
   }
 };
