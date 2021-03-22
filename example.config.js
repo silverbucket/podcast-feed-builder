@@ -6,7 +6,7 @@ module.exports = {
         episodes: `/category/episodes`
     },
     headers: {
-        cookie: 'put your cookie string here'
+        cookie: 'put your cookie string here',
         userAgent: 'put your browsers useragent string here'
     },
     dropbox: {
