@@ -5,8 +5,12 @@ const parse = require('node-html-parser').parse;
 const Podcast = require('podcast');
 const dropboxV2Api = require('dropbox-v2-api');
 const asyncPool = require('tiny-async-pool');
+const yargs = require('yargs/yargs');
+const { hideBin } = require('yargs/helpers');
 
 const config = require('./config.js');
+
+const argv = yargs(hideBin(process.argv)).argv;
 const feed = new Podcast(config.podcast);
 let dropboxFiles = [];
 
@@ -72,14 +76,18 @@ function processPage(res) {
     }
   }
   const entry = {
-    srcAudio: audio.split('?')[0]
+    srcAudio: audio.split('?')[0],
+    enclosure: { url: "" },
   };
-  if (! entry.srcAudio) {
-    return entry;
+
+  try {
+    entry.description = section.innerText;
+    entry.date = time.attributes.datetime;
+  } catch(e){}
+
+  if (entry.srcAudio) {
+    entry.filename = entry.srcAudio.split('/').pop();
   }
-  entry.filename = entry.srcAudio.split('/').pop();
-  entry.description = section.innerText;
-  entry.date = time.attributes.datetime;
   return entry;
 }
 
@@ -89,6 +97,7 @@ function existsOnDropbox(entry) {
     return (x.name === entry.filename);
   });
   if (matched) {
+    process.stdout.write('... exists on dropbox ');
     entry.dropboxId = matched.id
   }
   return entry;
@@ -98,24 +107,28 @@ function saveToDropbox(entry) {
   return new Promise((resolve, reject) => {
     if (! entry.srcAudio) { return resolve(entry); }
     if (entry.dropboxId) { return resolve(entry); }
+    const path = `${config.dropbox.episodes}/${entry.filename}`;
     dropbox({
       resource: 'files/save_url',
       parameters: {
-        path: `${config.dropbox.folder}/${entry.filename}`,
+        path: path,
         url: entry.srcAudio
       }
     }, (err, result, response) => {
-      // upload complete
-      if (err) { return reject('saving to dropbox ' + err); }
-      process.stdout.write('... saved to dropbox ')
-      return resolve(entry);
+      if (err) {
+        console.error(err);
+        return reject('error saving to dropbox ' + path);
+      } else {
+        process.stdout.write('... saved audio to dropbox ');
+        return resolve(entry);
+      }
     });
   })
 }
 
 function getSharedLink(entry) {
   return new Promise((resolve, reject) => {
-    if (entry.enclosure) { return resolve(entry); }
+    if (entry.enclosure.url) { return resolve(entry); }
     if (! entry.dropboxId) { return resolve(entry); }
     dropbox({
       resource: 'sharing/list_shared_links',
@@ -124,28 +137,30 @@ function getSharedLink(entry) {
       }
     }, (err, result, response) => {
       if (err) {
-        return reject('getting shared link ' + err);
-      }
-      if (result.links.length > 0) {
-        process.stdout.write('... got link ')
-        entry.enclosure = {
-          url: result.links[0].url
+        console.error(err);
+        return reject('error getting shared link for ' + entry.dropboxId);
+      } else {
+        if (result.links.length > 0) {
+          process.stdout.write('... got link ')
+          entry.enclosure = {
+            url: result.links[0].url
+          }
         }
+        return resolve(entry);
       }
-      return resolve(entry);
     });
   })
 }
 
 function createSharedLink(entry) {
   return new Promise((resolve, reject) => {
-    if (! entry.srcAudio) { return resolve(entry); }
+    if (entry.enclosure.url) { return resolve(entry); }
     if (! entry.dropboxId) { return resolve(entry); }
-    if (entry.enclosure) { return resolve(entry); }
+    const path = `${config.dropbox.episodes}/${entry.filename}`;
     dropbox({
       resource: 'sharing/create_shared_link_with_settings',
       parameters: {
-        path: `${config.dropbox.folder}/${entry.filename}`,
+        path: path,
         settings :{
           requested_visibility: "public",
           audience: "public",
@@ -155,15 +170,16 @@ function createSharedLink(entry) {
     }, (err, result, response) => {
       if (err) {
         if (err.code !== 409) {
-          return reject('create shared link ' + err);
+          console.error(err);
+          return reject('error creating shared link for ' + path);
         }
       } else {
         process.stdout.write('... created link ');
         entry.enclosure = {
           url: result.url
         }
+        return resolve(entry);
       }
-      return resolve(entry);
     });
   })
 }
@@ -171,9 +187,13 @@ function createSharedLink(entry) {
 function getMetadata(entry) {
   return new Promise((resolve, reject) => {
     if (! entry.title) { return resolve(entry); }
+    const path = config.dropbox.metadata + '/' + entry.title + '.json'
     const episode = new stream.Writable();
     episode._write = function (chunk, encoding, done) {
-      const metadata = JSON.parse(chunk.toString());
+      let metadata = {};
+      try {
+        metadata = JSON.parse(chunk.toString());
+      } catch(e) { return resolve(entry); }
       if (metadata.error) {
         return resolve(entry);
       } else {
@@ -184,11 +204,14 @@ function getMetadata(entry) {
     dropbox({
       resource: 'files/download',
       parameters: {
-        path: config.dropbox.folder + '/' + entry.title + '.json'
+        path: path
       }
     }, (err, result) => {
       // download completed
-      if (err) { reject('write episode data to dropbox ' + err); }
+      if (err) {
+        console.error(err);
+        reject('failed writing episode data to dropbox ' + path);
+      }
     }).pipe(episode)
   })
 }
@@ -196,8 +219,8 @@ function getMetadata(entry) {
 function saveMetadata(entry) {
   return new Promise((resolve, reject) => {
     if (! entry) { return resolve(entry); }
-    if (entry.saved) { return resolve(entry); }
-    entry.saved = true;
+    delete entry.saved;
+    const path = config.dropbox.metadata + '/' + entry.title + '.json';
     const episode = new stream.Readable();
     episode.push(JSON.stringify(entry));
     episode.push(null);
@@ -205,13 +228,15 @@ function saveMetadata(entry) {
       resource: 'files/upload',
       parameters: {
         mode: "overwrite",
-        path: config.dropbox.folder + '/' + entry.title + '.json'
+        path: path
       },
       readStream: episode
     }, (err, result) => {
       // upload completed
-      if (err) { reject('write episode data to dropbox ' + err); }
-      else {
+      if (err) {
+        console.error(err);
+        return reject('error writing episode data to dropbox for ' + path);
+      } else {
         process.stdout.write('... saved metadata ');
         return resolve(entry);
       }
@@ -225,7 +250,7 @@ function saveMetadata(entry) {
 const scrapePage = entry => new Promise((resolve, reject) => {
   console.log(`\n+ page ${entry.url}`);
   return getMetadata(entry).then((e) => {
-      if (e.enclosure.url) { return e; }
+      if (e.srcAudio) { return e; }
       process.stdout.write('... fetching ');
       return session.get(`${e.url}`)
         .then(processPage).catch((err) => { throw new Error('failed to fetch url ' + e.url + ': ' + err.toString())});
@@ -240,16 +265,17 @@ const scrapePage = entry => new Promise((resolve, reject) => {
     .then(saveMetadata)
     .then((e) => {
       if (! e.enclosure.url) {
-        console.log(`\n* skipping ${e.url}`)
+        console.log('... skipped!')
+        console.warn(`* skipping ${e.url}`)
       } else {
         feed.addItem(e);
-        console.log('... added to feed');
+        console.log('... added to feed.');
       }
       return resolve();
     })
     .catch((err) => {
-      console.log(`Error`);
-      console.log(err);
+      console.error(`Error`);
+      console.error(err);
     });
 });
 
@@ -258,16 +284,16 @@ function fetchPages(index) {
   return asyncPool(1, index, scrapePage);
 }
 
-function fetchIndex(page) {
-  const pageUrl = `${config.urls.episodes}/page/${page}/`;
+function fetchIndex(index) {
+  const pageUrl = `${config.urls.episodes}/page/${index}/`;
   console.log(`\nfetching ${pageUrl}`);
   session.get(pageUrl)
     .then(processIndex)
     .then(fetchPages)
-    // .then(() => { return fetchIndex(++page); })
+    .then(() => { return fetchIndex(++index); })
     .catch((err) => {
-      console.log(err);
-      console.log(`\nfinished indexing website, writing feed... `);
+      // console.error(err);
+      console.log(`\nfinished indexing website at index ${index}, writing feed... `);
       fs.writeFile(config.feedfile, feed.buildXml('\t'), () => {
         console.log(`= successfully wrote feed to ${config.feedfile}`)
       });
@@ -277,13 +303,15 @@ function fetchIndex(page) {
 dropbox({
   resource: 'files/list_folder',
   parameters: {
-    path: config.dropbox.folder
+    path: config.dropbox.episodes
   }
 }, (err, result) => {
   dropboxFiles = result.entries;
-  if (process.argv.length === 3) {
-    return scrapePage({ url: process.argv[2] });
+  // console.log(dropboxFiles);
+  // process.exit();
+  if (argv.page) {
+    return scrapePage({ url: argv.page });
   } else {
-    return fetchIndex(1);
+    return fetchIndex(argv.index || 1);
   }
 });
