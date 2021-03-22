@@ -113,19 +113,53 @@ function saveToDropbox(entry) {
       }
     }, (err, result, response) => {
       if (err) {
+        console.error('error saving to dropbox');
         console.error(err);
         return reject('error saving to dropbox ' + path);
       } else {
-        process.stdout.write('... saved audio to dropbox ');
-        return resolve(entry);
+        process.stdout.write('... saving audio to dropbox ');
+        const checkStatus = () => {
+          dropbox({
+            resource: 'files/save_url/check_job_status',
+            parameters: {
+              async_job_id: result.async_job_id
+            }
+          }, (err, res) => {
+            if (err) {
+              console.error('error waiting for save')
+              console.error(err);
+              return reject('error saving to dropbox ' + path);
+            } else {
+              if (res.name) {
+                entry.dropboxId = res.id;
+                process.stdout.write('saved ');
+              } else if (res.failed) {
+                process.stdout.write(`invalid url ${entry.srcAudio} `);
+              } else {
+                process.stdout.write('(wait 5s) ')
+                return setTimeout(checkStatus, 5000);
+              }
+              return resolve(entry);
+            }
+          });
+        };
+        process.stdout.write('(wait 5s) ')
+        return setTimeout(checkStatus, 5000);
       }
     });
   })
 }
 
+function cleanDownloadUrl(url) {
+  return url.replace('www.dropbox', 'dl.dropbox').split('?')[0];
+}
+
 function getSharedLink(entry) {
   return new Promise((resolve, reject) => {
-    if (entry.enclosure.url) { return resolve(entry); }
+    if (entry.enclosure.url) {
+      entry.enclosure.url = cleanDownloadUrl(entry.enclosure.url);
+      return resolve(entry);
+    }
     if (! entry.dropboxId) { return resolve(entry); }
     dropbox({
       resource: 'sharing/list_shared_links',
@@ -134,13 +168,14 @@ function getSharedLink(entry) {
       }
     }, (err, result, response) => {
       if (err) {
+        console.error('error getting shared link')
         console.error(err);
         return reject('error getting shared link for ' + entry.dropboxId);
       } else {
         if (result.links.length > 0) {
           process.stdout.write('... got link ')
           entry.enclosure = {
-            url: result.links[0].url
+            url: cleanDownloadUrl(result.links[0].url)
           }
         }
         return resolve(entry);
@@ -167,13 +202,14 @@ function createSharedLink(entry) {
     }, (err, result, response) => {
       if (err) {
         if (err.code !== 409) {
+          console.error('error creating shared link')
           console.error(err);
           return reject('error creating shared link for ' + path);
         }
       } else {
         process.stdout.write('... created link ');
         entry.enclosure = {
-          url: result.url
+          url: cleanDownloadUrl(result.url)
         }
         return resolve(entry);
       }
@@ -204,11 +240,10 @@ function getMetadata(entry) {
         path: path
       }
     }, (err, result) => {
-      // download completed
       if (err) {
-        console.error(err);
-        reject('failed writing episode data to dropbox ' + path);
+        process.stdout.write('... no metadata found ')
       }
+      return resolve(entry);
     }).pipe(episode)
   })
 }
@@ -231,8 +266,9 @@ function saveMetadata(entry) {
     }, (err, result) => {
       // upload completed
       if (err) {
+        console.error('error writing metadata to dropbox')
         console.error(err);
-        return reject('error writing episode data to dropbox for ' + path);
+        return reject('error writing metadata to dropbox for ' + path);
       } else {
         process.stdout.write('... saved metadata ');
         return resolve(entry);
@@ -248,7 +284,7 @@ const scrapePage = entry => new Promise((resolve, reject) => {
   console.log(`\n+ page ${entry.url}`);
   return getMetadata(entry).then((e) => {
       if (e.srcAudio) { return e; }
-      process.stdout.write('... fetching ');
+      process.stdout.write('... scraping ');
       return session.get(`${e.url}`)
         .then(processPage).catch((err) => { throw new Error('failed to fetch url ' + e.url + ': ' + err.toString())});
     })
@@ -271,8 +307,7 @@ const scrapePage = entry => new Promise((resolve, reject) => {
       return resolve();
     })
     .catch((err) => {
-      console.error(`Error`);
-      console.error(err);
+      console.error('caught error: ', err);
     });
 });
 
