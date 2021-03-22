@@ -1,119 +1,289 @@
-const path = require('path');
 const fs = require('fs');
+const stream = require('stream');
 const axios = require('axios');
 const parse = require('node-html-parser').parse;
-const RSS = require('rss');
+const Podcast = require('podcast');
+const dropboxV2Api = require('dropbox-v2-api');
+const asyncPool = require('tiny-async-pool');
 
 const config = require('./config.js');
-const feed = new RSS(config.podcast);
+const feed = new Podcast(config.podcast);
+let dropboxFiles = [];
 
+// dropbox api
+const dropbox = dropboxV2Api.authenticate({
+  token: config.dropbox.token
+});
+
+// http requests
 const session = axios.create({
   baseURL: config.urls.base,
   headers: config.headers
 });
 
-const downloadFile = async (fileUrl, downloadFolder) => {
-  // Get the file name
-  const fileName = path.basename(fileUrl);
-  // The path of the downloaded file on our machine
-  const localFilePath = path.resolve(__dirname, downloadFolder, fileName);
-  try {
-    const response = await axios({
-      method: "GET",
-      url: fileUrl,
-      responseType: "stream",
-    });
-    await response.data.pipe(fs.createWriteStream(localFilePath));
-  } catch (err) {
-    console.log("... file download failed ", err.toString());
-    throw new Error(err);
-  }
-};
 
-function fetchPage(page) {
-  session.get(`${config.urls.episodes}/page/${page}/`)
-    .then((res) => {
-      // get list of episodes from index page
-      const document = parse(res.data);
-      const articles = document.querySelectorAll('article');
-      const pages = [];
-      for (let elem of articles) {
-        const header = elem.childNodes[1].childNodes[1].childNodes[0].attributes;
-        pages.push({
-          guid: elem.id,
-          title: header.title,
-          url: header.href.trim(),
-          date: "",
-          filename: "",
-          description: "",
-          audio: "",
-          srcAudio: "",
-        });
-      }
-      return pages;
-    }).then((pages) => {
-      // get audio file and description from each page
-      return new Promise((resolve, reject) => {
-        let completed = 0;
-        return pages.forEach((page) => {
-          session.get(`${page.url}`)
-            .then((res) => {
-              const document = parse(res.data);
-              const section = document.querySelector('section');
-              // page.description = section.innerText;
-              const source = document.querySelector('source');
-              let audio = "";
-              if (source) {
-                audio = source.attributes.src;
-              } else {
-                for (let elem of section.childNodes) {
-                  if (typeof elem.getAttribute === 'function' && elem.getAttribute('class') === 'episode-audio-box') {
-                    try {
-                      audio = elem.querySelector('a').attributes.href;
-                    } catch (e) {}
-                  }
-                }
-              }
-              page.srcAudio = audio.split('?')[0];
-            }).then(() => {
-              // download audio file
-              if (page.srcAudio) {
-                page.filename = page.srcAudio.split('/').pop();
-                if (fs.existsSync(`${config.docroot}${page.filename}`)) {
-                  console.log(`... skipping ${page.title} - already downloaded`);
-                } else {
-                  return downloadFile(page.srcAudio, config.docroot);
-                }
-              }
-            }).then(() => {
-              // set public download url
-              if (page.srcAudio) {
-                page.src = `${config.podcast.site_url}/${page.filename}`;
-              }
-            }).then(() => {
-              if (page.srcAudio) {
-                // episodes[page.guid] = page;
-                feed.item(page);
-                console.log(`+ finished ${page.title}`);
-              } else {
-                console.log(`... no audio found for ${page.title} - ${page.url}`);
-              }
-            }).then(() => {
-              completed += 1;
-              if (completed === pages.length) resolve();
-            }).catch((err) => {
-              console.log(`... failed getting episode data for ${page.url}`, err.toString());
-            });
-        });
+function processIndex(res) {
+  return new Promise((resolve, reject) => {
+    // get list of episodes from index page
+    const document = parse(res.data);
+    const articles = document.querySelectorAll('article');
+    const index = [];
+    for (let elem of articles) {
+      const header = elem.childNodes[1].childNodes[1].childNodes[0].attributes;
+      index.push({
+        guid: elem.id,
+        title: header.title,
+        desc: "",
+        url: header.href.trim(),
+        date: "",
+        filename: "",
+        description: "",
+        srcAudio: "",
+        enclosure: {
+          type: "audio/mpeg",
+          url: ""
+        },
       });
-    }).then(() => {
-      console.log(`completed page ${page}`);
-      return fetchPage(++page);
-    }).catch((err) => {
-      console.log(err.toString());
-      // generate rss feed
-      fs.writeFile(config.feedfile, feed.xml({index: true}),
-        () => { console.log(`= successfully wrote feed to ${config.feedfile}`)});
+    }
+    return resolve(index);
+  });
+}
+
+function processPage(res) {
+  const document = parse(res.data);
+  const section = document.querySelector('section');
+  const source = document.querySelector('source');
+  const time = document.querySelector('time');
+  let audio = "";
+  if (source) {
+    audio = source.attributes.src;
+  } else {
+    try {
+      for (let elem of section.childNodes) {
+        if (typeof elem.getAttribute === 'function' && elem.getAttribute('class') === 'episode-audio-box') {
+          try {
+            audio = elem.querySelector('a').attributes.href;
+          } catch (e) {
+          }
+        }
+      }
+    } catch (e) {
+      return {}
+    }
+  }
+  const entry = {
+    srcAudio: audio.split('?')[0]
+  };
+  if (! entry.srcAudio) {
+    return entry;
+  }
+  entry.filename = entry.srcAudio.split('/').pop();
+  entry.description = section.innerText;
+  entry.date = time.attributes.datetime;
+  return entry;
+}
+
+function existsOnDropbox(entry) {
+  if (! entry.filename) { return entry; }
+  let matched = dropboxFiles.find((x) => {
+    return (x.name === entry.filename);
+  });
+  if (matched) {
+    entry.dropboxId = matched.id
+  }
+  return entry;
+}
+
+function saveToDropbox(entry) {
+  return new Promise((resolve, reject) => {
+    if (! entry.srcAudio) { return resolve(entry); }
+    if (entry.dropboxId) { return resolve(entry); }
+    dropbox({
+      resource: 'files/save_url',
+      parameters: {
+        path: `${config.dropbox.folder}/${entry.filename}`,
+        url: entry.srcAudio
+      }
+    }, (err, result, response) => {
+      // upload complete
+      if (err) { return reject('saving to dropbox ' + err); }
+      process.stdout.write('... saved to dropbox ')
+      return resolve(entry);
+    });
+  })
+}
+
+function getSharedLink(entry) {
+  return new Promise((resolve, reject) => {
+    if (entry.enclosure) { return resolve(entry); }
+    if (! entry.dropboxId) { return resolve(entry); }
+    dropbox({
+      resource: 'sharing/list_shared_links',
+      parameters: {
+        path: entry.dropboxId
+      }
+    }, (err, result, response) => {
+      if (err) {
+        return reject('getting shared link ' + err);
+      }
+      if (result.links.length > 0) {
+        process.stdout.write('... got link ')
+        entry.enclosure = {
+          url: result.links[0].url
+        }
+      }
+      return resolve(entry);
+    });
+  })
+}
+
+function createSharedLink(entry) {
+  return new Promise((resolve, reject) => {
+    if (! entry.srcAudio) { return resolve(entry); }
+    if (! entry.dropboxId) { return resolve(entry); }
+    if (entry.enclosure) { return resolve(entry); }
+    dropbox({
+      resource: 'sharing/create_shared_link_with_settings',
+      parameters: {
+        path: `${config.dropbox.folder}/${entry.filename}`,
+        settings :{
+          requested_visibility: "public",
+          audience: "public",
+          access: "viewer"
+        }
+      }
+    }, (err, result, response) => {
+      if (err) {
+        if (err.code !== 409) {
+          return reject('create shared link ' + err);
+        }
+      } else {
+        process.stdout.write('... created link ');
+        entry.enclosure = {
+          url: result.url
+        }
+      }
+      return resolve(entry);
+    });
+  })
+}
+
+function getMetadata(entry) {
+  return new Promise((resolve, reject) => {
+    if (! entry.title) { return resolve(entry); }
+    const episode = new stream.Writable();
+    episode._write = function (chunk, encoding, done) {
+      const metadata = JSON.parse(chunk.toString());
+      if (metadata.error) {
+        return resolve(entry);
+      } else {
+        process.stdout.write('... got metadata ');
+        return resolve(metadata);
+      }
+    }
+    dropbox({
+      resource: 'files/download',
+      parameters: {
+        path: config.dropbox.folder + '/' + entry.title + '.json'
+      }
+    }, (err, result) => {
+      // download completed
+      if (err) { reject('write episode data to dropbox ' + err); }
+    }).pipe(episode)
+  })
+}
+
+function saveMetadata(entry) {
+  return new Promise((resolve, reject) => {
+    if (! entry) { return resolve(entry); }
+    if (entry.saved) { return resolve(entry); }
+    entry.saved = true;
+    const episode = new stream.Readable();
+    episode.push(JSON.stringify(entry));
+    episode.push(null);
+    dropbox({
+      resource: 'files/upload',
+      parameters: {
+        mode: "overwrite",
+        path: config.dropbox.folder + '/' + entry.title + '.json'
+      },
+      readStream: episode
+    }, (err, result) => {
+      // upload completed
+      if (err) { reject('write episode data to dropbox ' + err); }
+      else {
+        process.stdout.write('... saved metadata ');
+        return resolve(entry);
+      }
+    });
+  })
+}
+
+// get audio file and description from each page
+// save to dropbox
+// save metadata to dropbox
+const scrapePage = entry => new Promise((resolve, reject) => {
+  console.log(`\n+ page ${entry.url}`);
+  return getMetadata(entry).then((e) => {
+      if (e.enclosure.url) { return e; }
+      process.stdout.write('... fetching ');
+      return session.get(`${e.url}`)
+        .then(processPage).catch((err) => { throw new Error('failed to fetch url ' + e.url + ': ' + err.toString())});
+    })
+    .then(existsOnDropbox)
+    .then(saveToDropbox)
+    .then(getSharedLink)
+    .then(createSharedLink)
+    .then((e) => {
+      return Object.assign(entry, e);
+    })
+    .then(saveMetadata)
+    .then((e) => {
+      if (! e.enclosure.url) {
+        console.log(`\n* skipping ${e.url}`)
+      } else {
+        feed.addItem(e);
+        console.log('... added to feed');
+      }
+      return resolve();
+    })
+    .catch((err) => {
+      console.log(`Error`);
+      console.log(err);
+    });
+});
+
+function fetchPages(index) {
+  console.log(`fetched index of ${index.length} entries... `)
+  return asyncPool(1, index, scrapePage);
+}
+
+function fetchIndex(page) {
+  const pageUrl = `${config.urls.episodes}/page/${page}/`;
+  console.log(`\nfetching ${pageUrl}`);
+  session.get(pageUrl)
+    .then(processIndex)
+    .then(fetchPages)
+    // .then(() => { return fetchIndex(++page); })
+    .catch((err) => {
+      console.log(err);
+      console.log(`\nfinished indexing website, writing feed... `);
+      fs.writeFile(config.feedfile, feed.buildXml('\t'), () => {
+        console.log(`= successfully wrote feed to ${config.feedfile}`)
+      });
     });
 }
-fetchPage(1);
+
+dropbox({
+  resource: 'files/list_folder',
+  parameters: {
+    path: config.dropbox.folder
+  }
+}, (err, result) => {
+  dropboxFiles = result.entries;
+  if (process.argv.length === 3) {
+    return scrapePage({ url: process.argv[2] });
+  } else {
+    return fetchIndex(1);
+  }
+});
