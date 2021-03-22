@@ -18,7 +18,10 @@
   "homepage": "https://github.com/silverbucket/podcast-feed-builder#readme",
   "dependencies": {
     "axios": "^0.21.1",
+    "dropbox-v2-api": "^2.4.38",
     "node-html-parser": "^3.0.3",
-    "rss": "^1.2.2"
+    "podcast": "^1.3.0",
+    "rss": "^1.2.2",
+    "tiny-async-pool": "^1.2.0"
   }
 }
