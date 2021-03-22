@@ -67,23 +67,20 @@ function processPage(res) {
         if (typeof elem.getAttribute === 'function' && elem.getAttribute('class') === 'episode-audio-box') {
           try {
             audio = elem.querySelector('a').attributes.href;
-          } catch (e) {
-          }
+          } catch (e) {}
         }
       }
-    } catch (e) {
-      return {}
-    }
+    } catch (e) {}
   }
   const entry = {
     srcAudio: audio.split('?')[0],
-    enclosure: { url: "" },
+    enclosure: { url: "" }
   };
 
   try {
     entry.description = section.innerText;
     entry.date = time.attributes.datetime;
-  } catch(e){}
+  } catch(e) {}
 
   if (entry.srcAudio) {
     entry.filename = entry.srcAudio.split('/').pop();
